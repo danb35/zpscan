@@ -1,4 +1,8 @@
 #! /usr/local/bin/bash
+# Scan pool for failed disks and light failure LED
+# Should work with Supermicro SAS2 backplanes, unknown if it will work in other environments
+# https://github.com/danb35/zpscan
+
 if [ ! "$1" ]; then
   echo "Usage: zpscan.sh pool [email]"
   echo "Scan a pool, send email notification and activate leds of failed drives"

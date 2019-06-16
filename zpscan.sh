@@ -3,6 +3,11 @@
 # Should work with Supermicro SAS2 backplanes, unknown if it will work in other environments
 # https://github.com/danb35/zpscan
 
+# Possible failure conditions:
+# -Unable to detect the correct LED if a failure happens before the first problem-free run after boot
+# -Unable to light fault LED if controller cannot see the drive
+# -Assumes drive serial numbers are unique in a system
+
 if [ ! "$1" ]; then
   echo "Usage: zpscan.sh pool [email]"
   echo "Scan a pool, send email notification and activate leds of failed drives"
@@ -34,31 +39,46 @@ if [ "${condition}" ]; then
   for drive in $drivelist;
   do
     record=$(grep -E "^$drive" $drivesfile)
-    location=$(echo $record | cut -f 3 -d " ")
+    controller=$(echo $record | cut -f 3 -d " ")
+    encaddr=$(echo $record | cut -f 4 -d " ")
     echo Locating: $record
-    sas2ircu 0 locate $location ON
-    if [ ! "$(egrep $location $locsfile)" ]; then
-      echo $location >> $locsfile
+    sas2ircu $controller locate $encaddr ON
+    # Add to list of enabled LEDs
+    if [ $(egrep "$controller $encaddr" $locsfile | wc -c) -eq 0 ]; then
+      echo $controller $encaddr >> $locsfile
     fi
   done
   rm /tmp/glabel-lookup.sed
 else
   echo "Saving drive list."
   glabel status | awk '{print "s|"$1"|"$3"\t\t\t      |g"}' > /tmp/glabel-lookup.sed
-  drivelist=$(zpool status $pool  | sed -f /tmp/glabel-lookup.sed | sed 's/p[0-9]//' | grep -E $'^\t  ' | grep -vE "^\W+($pool|NAME|mirror|raidz|stripe|logs|spares)" | sed -E $'s/^[\t ]+//;s/([a-z0-9]+).*/\\1/')
-  saslist=$(sas2ircu 0 display)
+  drivelist=$(zpool status $pool | sed -f /tmp/glabel-lookup.sed | sed 's/p[0-9]//' | grep -E $'^\t  ' | grep -vE "^\W+($pool|NAME|mirror|raidz|stripe|logs|spares)" | sed -E $'s/^[\t ]+//;s/([a-z0-9]+).*/\\1/')
+  controllerlist=$(sas2ircu list | grep -E ' [0-9]+ ' | sed -E $'s/^[\t ]+//;s/([0-9]+).*/\\1/')
   printf "" > $drivesfile
-  for drive in $drivelist;
+  # Go through each controller and check if the drive is attached to that controller
+  for controller in $controllerlist;
   do
-    sasaddr=$(sg_vpd -i -q $drive 2>/dev/null | sed -E '2!d;s/,.*//;s/  0x//;s/([0-9a-f]{7})([0-9a-f])([0-9a-f]{4})([0-9a-f]{4})/\1-\2-\3-\4/')
-    encaddr=$(echo "$saslist" | grep $sasaddr -B 2 | sed -E 'N;s/^.*: ([0-9]+)\n.*: ([0-9]+)/\1:\2/')
-  echo $drive $sasaddr $encaddr >> $drivesfile
+    saslist=$(sas2ircu $controller display)
+    for drive in $drivelist;
+    do
+      # "diskinfo -s disk" and "camcontrol identify [device id] -S" should be equivalent
+      # WD disks have a WD- prefix that sas2ircu does not show, so we remove it
+      serial=$(diskinfo -s /dev/$drive 2>/dev/null | sed -E 's/^WD-//;s/[\t ]+//')
+      encaddr=$(echo "$saslist" | grep "$serial" -B 8 | sed -E '1!d;N;s/^.*: ([0-9]+)\n.*: ([0-9]+)/\1:\2/')
+      # Add to list of mappings
+      if [ "${encaddr}" ]; then
+        echo $drive $serial $controller $encaddr >> $drivesfile
+      fi
+    done
   done
 
-  for loc in $(cat $locsfile);
+  # Turn off all enabled LEDs
+  while IFS= read -r loc;
   do
-    sas2ircu 0 locate $loc OFF
-  done
+    controller=$(echo "$loc" | cut -f 1 -d " ")
+    encaddr=$(echo "$loc" | cut -f 2 -d " ")
+    sas2ircu $controller locate $encaddr OFF
+  done < $locsfile
   printf "" > $locsfile
   rm /tmp/glabel-lookup.sed
 fi

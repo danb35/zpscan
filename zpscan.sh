@@ -13,6 +13,12 @@ if [ ! "$1" ]; then
   echo "Scan a pool, send email notification and activate leds of failed drives"
   exit
 fi
+
+if [ $(pgrep -f zpscan.sh | wc -c) -ne 0 ]; then
+  echo "Multiple instances of this script cannot be run at the same time due to sas2ircu not being able to run concurrently."
+  exit
+fi
+
 pool="$1"
 basedir="/root/.sas2ircu"
 drivesfile=$basedir/drives-$pool
@@ -29,12 +35,12 @@ else
 fi
 condition=$(/sbin/zpool status $pool | egrep -i '(DEGRADED|FAULTED|OFFLINE|UNAVAIL|REMOVED|FAIL|DESTROYED|corrupt|cannot|unrecover)')
 if [ "${condition}" ]; then
-  glabel status | awk '{print "s|"$1"|"$3"\t\t\t      |g"}' > /tmp/glabel-lookup.sed
+  glabel status | awk '{print "s|"$1"|"$3"\t\t\t      |g"}' > /tmp/glabel-lookup-$pool.sed
   emailSubject="`hostname` - ZFS pool - HEALTH fault"
   mailbody=$(zpool status $pool)
   echo "Sending email notification of degraded pool $pool"
   echo "$mailbody" | mail -s "Degraded pool $pool on `hostname`" $email
-  drivelist=$(zpool status $pool | sed -f /tmp/glabel-lookup.sed | sed 's/p[0-9]//' | grep -E "(DEGRADED|FAULTED|OFFLINE|UNAVAIL|REMOVED|FAIL|DESTROYED)" | grep -vE "^\W+($pool|NAME|mirror|raidz|stripe|logs|spares|state)" | sed -E $'s/.*was \/dev\/([0-9a-z]+)/\\1/;s/^[\t  ]+([0-9a-z]+)[\t ]+.*$/\\1/')
+  drivelist=$(zpool status $pool | sed -f /tmp/glabel-lookup-$pool.sed | sed 's/p[0-9]//' | grep -E "(DEGRADED|FAULTED|OFFLINE|UNAVAIL|REMOVED|FAIL|DESTROYED)" | grep -vE "^\W+($pool|NAME|mirror|raidz|stripe|logs|spares|state)" | sed -E $'s/.*was \/dev\/([0-9a-z]+)/\\1/;s/^[\t  ]+([0-9a-z]+)[\t ]+.*$/\\1/')
   echo "Locating failed drives."
   for drive in $drivelist;
   do
@@ -48,11 +54,11 @@ if [ "${condition}" ]; then
       echo $controller $encaddr >> $locsfile
     fi
   done
-  rm /tmp/glabel-lookup.sed
+  rm /tmp/glabel-lookup-$pool.sed
 else
   echo "Saving drive list."
-  glabel status | awk '{print "s|"$1"|"$3"\t\t\t      |g"}' > /tmp/glabel-lookup.sed
-  drivelist=$(zpool status $pool | sed -f /tmp/glabel-lookup.sed | sed 's/p[0-9]//' | grep -E $'^\t  ' | grep -vE "^\W+($pool|NAME|mirror|raidz|stripe|logs|spares)" | sed -E $'s/^[\t ]+//;s/([a-z0-9]+).*/\\1/')
+  glabel status | awk '{print "s|"$1"|"$3"\t\t\t      |g"}' > /tmp/glabel-lookup-$pool.sed
+  drivelist=$(zpool status $pool | sed -f /tmp/glabel-lookup-$pool.sed | sed 's/p[0-9]//' | grep -E $'^\t  ' | grep -vE "^\W+($pool|NAME|mirror|raidz|stripe|logs|spares)" | sed -E $'s/^[\t ]+//;s/([a-z0-9]+).*/\\1/')
   controllerlist=$(sas2ircu list | grep -E ' [0-9]+ ' | sed -E $'s/^[\t ]+//;s/([0-9]+).*/\\1/')
   printf "" > $drivesfile
   # Go through each controller and check if the drive is attached to that controller
@@ -80,5 +86,5 @@ else
     sas2ircu $controller locate $encaddr OFF
   done < $locsfile
   printf "" > $locsfile
-  rm /tmp/glabel-lookup.sed
+  rm /tmp/glabel-lookup-$pool.sed
 fi
